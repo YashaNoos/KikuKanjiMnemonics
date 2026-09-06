@@ -30,3 +30,20 @@ To allow Kiku to talk to Anki securely, configure AnkiConnect's CORS settings:
        "[https://kiku.youyoumu.my.id]"
      ]
    }
+### 2. Install the Plugin
+Download _kiku_plugin.js from this repository.
+
+Drop the file into your Kiku collection.media folder (or wherever your custom plugins are stored).
+
+If your Anki deck uses different names for the Deck, Kanji field, Keyword field, or Story field, open _kiku_plugin.js and edit the constants at the top of the file:
+
+```javascript
+const DECK_QUERY = '("deck:Kanji_RTK")';
+
+const FIELD_KANJI = "Character";
+const FIELD_KEYWORD = "Keyword";
+const FIELD_MNEMONIC = "Story";
+```
+
+## Usage
+Simply open a kanji popup, the plugin will query Anki and display your custom keyword and story!
