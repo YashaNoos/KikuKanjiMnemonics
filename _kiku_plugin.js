@@ -5,8 +5,7 @@
  * SETUP:
  * 1. Install the "AnkiConnect" add-on (code 2055492159) if you don't have it.
  * 2. Tools > Add-ons > AnkiConnect > Config, and make sure "webCorsOriginList"
- *    includes "https://kiku.youyoumu.my.id"(or restart Anki after adding it)
- *    Restart Anki after changing this.
+ *    includes "https://kiku.youyoumu.my.id" (or restart Anki after adding it).
  * 3. Drop this file in your collection.media folder as `_kiku_plugin.js`
  *    (if you already have one, merge the `plugin` object below into it).
  * 4. Edit DECK_QUERY / FIELD_KANJI / FIELD_KEYWORD / FIELD_MNEMONIC below if
@@ -17,15 +16,16 @@
 
 const ANKI_CONNECT_URL = "http://127.0.0.1:8765";
 
-
+// Deck name check it in the anki browser
 const DECK_QUERY = '("deck:Kanji_RTK")';
 
+// Field names (case-sensitive as defined in your Note Type)
 const FIELD_KANJI = "Character";
 const FIELD_KEYWORD = "Keyword";
 const FIELD_MNEMONIC = "Story";
 
-// Set to true while debugging: shows what happened right in the popup.
-const DEBUG = true;
+// Set to true while debugging; set to false for production.
+const DEBUG = false;
 
 /** @typedef {{ kanji: string, keyword: string, mnemonic: string, status: "ok" }} RtkOk */
 /** @typedef {{ status: "not_found" | "error", detail: string }} RtkFail */
@@ -33,16 +33,78 @@ const DEBUG = true;
 const rtkCache = new Map();
 
 /**
+ * Exposing a helper to clear the memory cache if notes are edited in Anki.
+ */
+export function clearRtkCache() {
+  rtkCache.clear();
+}
+
+/**
+ * Strips executable scripts, dangerous tags, inline CSS styles, and un-sanitized URIs while preserving HTML formatting.
+ * @param {string} html
+ * @returns {string}
+ */
+function sanitizeHtml(html) {
+  if (!html) return "";
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const FORBIDDEN_TAGS = ["script", "iframe", "object", "embed", "style", "link", "form", "base"];
+
+  // 1. Remove dangerous elements completely
+  doc.querySelectorAll(FORBIDDEN_TAGS.join(",")).forEach((el) => el.remove());
+
+  // 2. Strip inline styles, event handlers, and dangerous URI schemes
+  const elements = doc.body.querySelectorAll("*");
+  for (const el of elements) {
+    // Strip inline styles to prevent CSS-based injection/layout distortion
+    el.removeAttribute("style");
+
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim().toLowerCase();
+
+      // Strip event attributes (onload, onerror, etc.)
+      if (name.startsWith("on")) {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+
+      // Block executable and embedding URI protocols
+      if (value.startsWith("javascript:") || value.startsWith("data:") || value.startsWith("vbscript:")) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  }
+
+  return doc.body.innerHTML;
+}
+
+/**
  * @param {string} action
  * @param {Record<string, unknown>} [params]
  */
 async function invokeAnkiConnect(action, params = {}) {
-  const res = await fetch(ANKI_CONNECT_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, version: 6, params }),
-  });
-  const data = await res.json();
+  let res;
+  try {
+    res = await fetch(ANKI_CONNECT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, version: 6, params }),
+    });
+  } catch (err) {
+    throw new Error(`Could not connect to Anki at ${ANKI_CONNECT_URL}. Is Anki running and AnkiConnect configured?`);
+  }
+
+  if (!res.ok) {
+    throw new Error(`AnkiConnect HTTP error! status: ${res.status} ${res.statusText}`);
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch (err) {
+    throw new Error(`AnkiConnect: Failed to parse JSON response (status: ${res.status})`);
+  }
+
   if (data.error) throw new Error(data.error);
   return data.result;
 }
@@ -57,7 +119,9 @@ function fetchRtkData(kanji) {
   if (!kanji) return Promise.resolve({ status: "error", detail: "no kanji given" });
   if (rtkCache.has(kanji)) return /** @type {Promise<any>} */ (rtkCache.get(kanji));
 
-  const query = `${DECK_QUERY} ${FIELD_KANJI}:${kanji}`;
+  // Escaping quotes inside the search query prevents query syntax errors
+  const safeKanji = kanji.replace(/"/g, '\\"');
+  const query = `${DECK_QUERY} ${FIELD_KANJI}:"${safeKanji}"`;
 
   const promise = (async () => {
     try {
@@ -72,18 +136,19 @@ function fetchRtkData(kanji) {
         return /** @type {RtkFail} */ ({ status: "not_found", detail: query });
       }
 
-      if (!(FIELD_KEYWORD in note.fields) && !(FIELD_MNEMONIC in note.fields)) {
+      if (!note.fields || (!(FIELD_KEYWORD in note.fields) && !(FIELD_MNEMONIC in note.fields))) {
+        const fieldsFound = note.fields ? Object.keys(note.fields).join(", ") : "none";
         return /** @type {RtkFail} */ ({
           status: "error",
-          detail: `note found, but has no "${FIELD_KEYWORD}"/"${FIELD_MNEMONIC}" field. Fields on this note: ${Object.keys(note.fields).join(", ")}`,
+          detail: `Note found, but missing "${FIELD_KEYWORD}" or "${FIELD_MNEMONIC}". Fields present: ${fieldsFound}`,
         });
       }
 
       return /** @type {RtkOk} */ ({
         status: "ok",
         kanji,
-        keyword: note.fields?.[FIELD_KEYWORD]?.value ?? "",
-        mnemonic: note.fields?.[FIELD_MNEMONIC]?.value ?? "",
+        keyword: sanitizeHtml(note.fields[FIELD_KEYWORD]?.value ?? ""),
+        mnemonic: sanitizeHtml(note.fields[FIELD_MNEMONIC]?.value ?? ""),
       });
     } catch (e) {
       console.warn("[rtk-kiku-plugin] AnkiConnect lookup failed:", e);
@@ -110,18 +175,12 @@ export const plugin = {
     const [$$rtk] = createResource(() => $kanji.kanji, fetchRtkData);
 
     function RtkSection() {
-      // By returning an arrow function here, SolidJS treats everything
-      // inside as a reactive computation and updates it dynamically.
       return () => {
         const result = $$rtk();
 
-        // 1. Still loading / Pending
         if (!result) return null;
-
-        // 2. Guard against a stale kanji's cached result showing temporarily
         if (result.status === "ok" && result.kanji !== $kanji.kanji) return null;
 
-        // 3. Error or Not Found state
         if (result.status !== "ok") {
           if (!DEBUG) return null;
           return h(
@@ -131,7 +190,6 @@ export const plugin = {
           );
         }
 
-        // 4. Success state - dynamically push elements that exist
         const contentNodes = [];
 
         if (result.keyword) {
@@ -150,7 +208,7 @@ export const plugin = {
               h(
                 "div",
                 { class: "collapse-title p-0 mb-1 after:text-base-content-calm text-start" },
-                h("div", { class: "font-bold text-base-content-calm" }, "My Story") // Updated label text too
+                h("div", { class: "font-bold text-base-content-calm" }, "My Story")
               ),
               h(
                 "div",
@@ -161,7 +219,6 @@ export const plugin = {
           );
         }
 
-        // Render the finalized UI block
         return h(
           "div",
           {
@@ -177,7 +234,7 @@ export const plugin = {
       VisuallySimilar(),
       ComposedOf(),
       UsedIn(),
-      Meanings(), // remove this line if you don't want the WaniKani/JPDB meanings
+      Meanings(),
       Related(),
     ];
   },
