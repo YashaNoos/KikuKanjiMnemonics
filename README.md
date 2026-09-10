@@ -16,21 +16,7 @@ A custom plugin for [Kiku](https://kiku.youyoumu.my.id) that connects to your lo
 
 ## Setup Instructions
 
-### 1. Configure AnkiConnect
-To allow Kiku to talk to Anki securely, configure AnkiConnect's CORS settings:
-1. In Anki, go to **Tools > Add-ons > AnkiConnect > Config**.
-2. Change the configuration to allow Kiku's URL:
-   ```json
-   {
-     "apiKey": null,
-     "apiLogPath": null,
-     "webBindAddress": "127.0.0.1",
-     "webBindPort": 8765,
-     "webCorsOriginList": [
-       "[https://kiku.youyoumu.my.id]"
-     ]
-   }
-### 2. Install the Plugin
+### Install the Plugin
 Download _kiku_plugin.js from this repository.
 
 Drop the file into your Kiku collection.media folder (or wherever your custom plugins are stored).
