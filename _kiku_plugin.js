@@ -5,7 +5,7 @@
  * SETUP:
  * 1. Install the "AnkiConnect" add-on (code 2055492159) if you don't have it.
  * 2. Tools > Add-ons > AnkiConnect > Config, and make sure "webCorsOriginList"
- *    includes "https://kiku.youyoumu.my.id" (or restart Anki after adding it).
+ *    includes your frontend origin if accessed via browser (or leave as configured).
  * 3. Drop this file in your collection.media folder as `_kiku_plugin.js`
  *    (if you already have one, merge the `plugin` object below into it).
  * 4. Edit DECK_QUERY / FIELD_KANJI / FIELD_KEYWORD / FIELD_MNEMONIC below if
@@ -40,36 +40,47 @@ export function clearRtkCache() {
 }
 
 /**
- * Strips executable scripts, dangerous tags, inline CSS styles, and un-sanitized URIs while preserving HTML formatting.
+ * Sanitizes HTML using a strict allowlist approach to prevent XSS and DOM clobbering.
+ * Unrecognized tags are unwrapped (preserving text) or safely removed.
  * @param {string} html
  * @returns {string}
  */
 function sanitizeHtml(html) {
   if (!html) return "";
+
   const doc = new DOMParser().parseFromString(html, "text/html");
-  const FORBIDDEN_TAGS = ["script", "iframe", "object", "embed", "style", "link", "form", "base"];
 
-  // 1. Remove dangerous elements completely
-  doc.querySelectorAll(FORBIDDEN_TAGS.join(",")).forEach((el) => el.remove());
+  // Strict allowlist of safe formatting tags (includes furigana tags)
+  const ALLOWED_TAGS = new Set([
+    "b", "i", "u", "strong", "em", "span", "div", "p",
+    "br", "hr", "ul", "ol", "li", "ruby", "rt", "rp"
+  ]);
 
-  // 2. Strip inline styles, event handlers, and dangerous URI schemes
-  const elements = doc.body.querySelectorAll("*");
+  // Strictly allow ONLY 'class' attributes to avoid event handlers, styles, or URIs
+  const ALLOWED_ATTRS = new Set(["class"]);
+
+  // Traverse bottom-up to safely unwrap or remove nodes
+  const elements = Array.from(doc.body.querySelectorAll("*")).reverse();
+
   for (const el of elements) {
-    // Strip inline styles to prevent CSS-based injection/layout distortion
-    el.removeAttribute("style");
+    const tag = el.tagName.toLowerCase();
 
-    for (const attr of Array.from(el.attributes)) {
-      const name = attr.name.toLowerCase();
-      const value = attr.value.trim().toLowerCase();
-
-      // Strip event attributes (onload, onerror, etc.)
-      if (name.startsWith("on")) {
-        el.removeAttribute(attr.name);
-        continue;
+    if (!ALLOWED_TAGS.has(tag)) {
+      if (["script", "style", "iframe", "object", "embed", "link", "meta", "template", "noscript", "canvas"].includes(tag)) {
+        el.remove();
+      } else {
+        // Unwrap unrecognized tags to keep inner text readable
+        while (el.firstChild) {
+          el.parentNode.insertBefore(el.firstChild, el);
+        }
+        el.remove();
       }
+      continue;
+    }
 
-      // Block executable and embedding URI protocols
-      if (value.startsWith("javascript:") || value.startsWith("data:") || value.startsWith("vbscript:")) {
+    // Strip any attribute not explicitly allowlisted
+    for (const attr of Array.from(el.attributes)) {
+      if (!ALLOWED_ATTRS.has(attr.name.toLowerCase())) {
         el.removeAttribute(attr.name);
       }
     }
@@ -119,8 +130,8 @@ function fetchRtkData(kanji) {
   if (!kanji) return Promise.resolve({ status: "error", detail: "no kanji given" });
   if (rtkCache.has(kanji)) return /** @type {Promise<any>} */ (rtkCache.get(kanji));
 
-  // Escaping quotes inside the search query prevents query syntax errors
-  const safeKanji = kanji.replace(/"/g, '\\"');
+  // Securely escape backslashes first, then quotes to prevent query syntax injection
+  const safeKanji = kanji.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const query = `${DECK_QUERY} ${FIELD_KANJI}:"${safeKanji}"`;
 
   const promise = (async () => {
@@ -140,7 +151,7 @@ function fetchRtkData(kanji) {
         const fieldsFound = note.fields ? Object.keys(note.fields).join(", ") : "none";
         return /** @type {RtkFail} */ ({
           status: "error",
-          detail: `Note found, but missing "${FIELD_KEYWORD}" or "${FIELD_MNEMONIC}". Fields present: ${fieldsFound}`,
+          detail: `Note found, but missing required fields.`,
         });
       }
 
@@ -154,7 +165,7 @@ function fetchRtkData(kanji) {
       console.warn("[rtk-kiku-plugin] AnkiConnect lookup failed:", e);
       return /** @type {RtkFail} */ ({
         status: "error",
-        detail: e instanceof Error ? e.message : String(e),
+        detail: DEBUG && e instanceof Error ? e.message : "Lookup failed safely.",
       });
     }
   })();
@@ -186,7 +197,7 @@ export const plugin = {
           return h(
             "div",
             { class: "text-xs text-red-500 border border-red-500/50 p-2 mb-2" },
-            `[rtk-plugin] ${result.status}: ${result.detail}`
+            `[rtk-plugin] ${result.status}`
           );
         }
 
